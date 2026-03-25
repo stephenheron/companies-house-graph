@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   Background,
@@ -8,38 +8,24 @@ import {
   type Node,
   type Edge,
 } from '@xyflow/react'
-import dagre from '@dagrejs/dagre'
 import '@xyflow/react/dist/style.css'
-
+import { LayoutGrid } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { OfficerNode } from './officer-node'
 import { CompanyNode } from './company-node'
-import { getOfficerAppointments, getCompanyOfficers } from '@/lib/companies-house'
+import { DetailSheet, type SelectedNode } from './detail-sheet'
+import { layoutGraph, layoutNewNodes } from './graph-layout'
+import {
+  getOfficerAppointments,
+  getCompanyOfficers,
+  getCompanyProfile,
+  getCompanyFilingHistory,
+} from '@/lib/companies-house'
 import type { Appointment } from '@/lib/companies-house'
 
 const nodeTypes = {
   officer: OfficerNode,
   company: CompanyNode,
-}
-
-const NODE_WIDTH = 220
-const NODE_HEIGHT = 60
-
-function layoutNodes(nodes: Node[], edges: Edge[]): Node[] {
-  const g = new dagre.graphlib.Graph()
-  g.setDefaultEdgeLabel(() => ({}))
-  g.setGraph({ rankdir: 'TB', nodesep: 80, ranksep: 120 })
-
-  nodes.forEach((n) => g.setNode(n.id, { width: NODE_WIDTH, height: NODE_HEIGHT }))
-  edges.forEach((e) => g.setEdge(e.source, e.target))
-  dagre.layout(g)
-
-  return nodes.map((n) => {
-    const pos = g.node(n.id)
-    return {
-      ...n,
-      position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - NODE_HEIGHT / 2 },
-    }
-  })
 }
 
 interface RelationshipGraphProps {
@@ -87,12 +73,11 @@ function buildInitialGraph(
         id: edgeId,
         source: `officer:${officerId}`,
         target: companyId,
-        label: apt.officer_role.replaceAll('-', ' '),
       })
     }
   }
 
-  return { nodes: layoutNodes(nodes, edges), edges }
+  return layoutGraph(nodes, edges)
 }
 
 export function RelationshipGraph({ officerId, officerName, appointments }: RelationshipGraphProps) {
@@ -104,13 +89,15 @@ export function RelationshipGraph({ officerId, officerName, appointments }: Rela
   const [nodes, setNodes, onNodesChange] = useNodesState(initial.nodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(initial.edges)
   const [expandedSet] = useState(() => new Set([`officer:${officerId}`]))
+  const [selectedNode, setSelectedNode] = useState<SelectedNode | null>(null)
+  const [sheetOpen, setSheetOpen] = useState(false)
+  const clickTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const expandNode = useCallback(
     async (nodeId: string, nodeType: string) => {
       if (expandedSet.has(nodeId)) return
       expandedSet.add(nodeId)
 
-      // Set loading
       setNodes((prev) =>
         prev.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, loading: true } } : n)),
       )
@@ -142,7 +129,6 @@ export function RelationshipGraph({ officerId, officerName, appointments }: Rela
               id: `${nodeId}->${companyId}`,
               source: nodeId,
               target: companyId,
-              label: apt.officer_role.replaceAll('-', ' '),
             })
           }
         } else if (nodeType === 'company') {
@@ -169,7 +155,6 @@ export function RelationshipGraph({ officerId, officerName, appointments }: Rela
               id: `${officerNodeId}->${nodeId}`,
               source: officerNodeId,
               target: nodeId,
-              label: officer.officer_role.replaceAll('-', ' '),
             })
           }
         }
@@ -180,23 +165,21 @@ export function RelationshipGraph({ officerId, officerName, appointments }: Rela
             const dedupedEdges = newEdges.filter((e) => !existingEdgeIds.has(e.id))
             const allEdges = [...prevEdges, ...dedupedEdges]
 
-            // We need to layout with the final node list too
             const existingNodeIds = new Set(prev.map((n) => n.id))
             const dedupedNodes = newNodes.filter((n) => !existingNodeIds.has(n.id))
             const updatedNodes = prev.map((n) =>
               n.id === nodeId ? { ...n, data: { ...n.data, loading: false, expanded: true } } : n,
             )
-            const allNodes = [...updatedNodes, ...dedupedNodes]
 
-            const laid = layoutNodes(allNodes, allEdges)
-            // setNodes expects us to return from the callback, but we're inside setEdges
-            // We'll use a workaround: set nodes after edges
-            setTimeout(() => setNodes(laid), 0)
+            const laid = layoutNewNodes(updatedNodes, dedupedNodes, allEdges, nodeId)
+            setTimeout(() => {
+              setNodes(laid.nodes)
+              setEdges(laid.edges)
+            }, 0)
 
-            return allEdges
+            return prevEdges
           })
 
-          // Return prev unchanged; the real update happens in the setTimeout above
           return prev
         })
       } catch {
@@ -213,24 +196,73 @@ export function RelationshipGraph({ officerId, officerName, appointments }: Rela
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
+      if (clickTimeout.current) clearTimeout(clickTimeout.current)
+      clickTimeout.current = setTimeout(async () => {
+        try {
+          if (node.type === 'company') {
+            const companyNumber = node.id.replace('company:', '')
+            const [profile, filingHistory] = await Promise.all([
+              getCompanyProfile({ data: companyNumber }),
+              getCompanyFilingHistory({ data: companyNumber }),
+            ])
+            setSelectedNode({ type: 'company', data: profile, filings: filingHistory.items ?? [] })
+          } else if (node.type === 'officer') {
+            const id = node.id.replace('officer:', '')
+            const details = await getOfficerAppointments({ data: id })
+            setSelectedNode({ type: 'officer', data: details })
+          }
+          setSheetOpen(true)
+        } catch {
+          // silently fail
+        }
+      }, 250)
+    },
+    [],
+  )
+
+  const handleNodeDoubleClick = useCallback(
+    (_: React.MouseEvent, node: Node) => {
+      if (clickTimeout.current) clearTimeout(clickTimeout.current)
       expandNode(node.id, node.type ?? '')
     },
     [expandNode],
   )
 
+  const handleReorganize = useCallback(() => {
+    const result = layoutGraph(nodes, edges)
+    setNodes(result.nodes)
+    setEdges(result.edges)
+  }, [nodes, edges, setNodes, setEdges])
+
   return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onNodeClick={handleNodeClick}
-      nodeTypes={nodeTypes}
-      fitView
-      proOptions={{ hideAttribution: true }}
-    >
-      <Background />
-      <Controls />
-    </ReactFlow>
+    <>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onNodeClick={handleNodeClick}
+        onNodeDoubleClick={handleNodeDoubleClick}
+        nodeTypes={nodeTypes}
+        fitView
+        colorMode="dark"
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background />
+        <Controls />
+        <div className="absolute right-4 top-4 z-10">
+          <Button variant="secondary" size="sm" onClick={handleReorganize}>
+            <LayoutGrid className="mr-2 h-4 w-4" />
+            Reorganize
+          </Button>
+        </div>
+      </ReactFlow>
+
+      <DetailSheet
+        open={sheetOpen}
+        onOpenChange={setSheetOpen}
+        selectedNode={selectedNode}
+      />
+    </>
   )
 }

@@ -106,6 +106,144 @@ export interface CompanyOfficerList {
   total_results: number
 }
 
+export interface CompanyProfile {
+  company_name: string
+  company_number: string
+  company_status: string
+  type: string
+  date_of_creation?: string
+  date_of_cessation?: string
+  registered_office_address?: {
+    address_line_1?: string
+    address_line_2?: string
+    locality?: string
+    postal_code?: string
+    region?: string
+    country?: string
+  }
+  sic_codes?: string[]
+  accounts?: {
+    next_due?: string
+    last_accounts?: {
+      made_up_to?: string
+    }
+  }
+  confirmation_statement?: {
+    next_due?: string
+  }
+}
+
+export const getCompanyProfile = createServerFn({ method: 'GET' })
+  .inputValidator((companyNumber: string) => companyNumber)
+  .handler(async ({ data: companyNumber }): Promise<CompanyProfile> => {
+    const url = `https://api.company-information.service.gov.uk/company/${companyNumber}`
+
+    const res = await fetch(url, { headers: authHeaders() })
+
+    if (!res.ok) {
+      throw new Error(`Companies House API error: ${res.status}`)
+    }
+
+    return res.json()
+  })
+
+export interface Filing {
+  date: string
+  description: string
+  description_values?: Record<string, string>
+  category: string
+  type: string
+  pages?: number
+  paper_filed?: boolean
+  links?: {
+    self?: string
+    document_metadata?: string
+  }
+}
+
+export interface FilingHistoryList {
+  items: Filing[]
+  total_count: number
+}
+
+export const getCompanyFilingHistory = createServerFn({ method: 'GET' })
+  .inputValidator((companyNumber: string) => companyNumber)
+  .handler(async ({ data: companyNumber }): Promise<FilingHistoryList> => {
+    const url = new URL(`https://api.company-information.service.gov.uk/company/${companyNumber}/filing-history`)
+    url.searchParams.set('items_per_page', '20')
+
+    const res = await fetch(url.toString(), { headers: authHeaders() })
+
+    if (!res.ok) {
+      throw new Error(`Companies House API error: ${res.status}`)
+    }
+
+    return res.json()
+  })
+
+export interface DocumentMetadata {
+  pages: number
+  links: {
+    self: string
+    document: string
+  }
+  resources: Record<string, { content_length: number }>
+}
+
+export const getDocumentMetadata = createServerFn({ method: 'GET' })
+  .inputValidator((metadataUrl: string) => metadataUrl)
+  .handler(async ({ data: metadataUrl }): Promise<DocumentMetadata> => {
+    const res = await fetch(metadataUrl, { headers: authHeaders() })
+
+    if (!res.ok) {
+      throw new Error(`Document API error: ${res.status}`)
+    }
+
+    return res.json()
+  })
+
+export const getDocumentDownloadUrl = createServerFn({ method: 'GET' })
+  .inputValidator((contentUrl: string) => contentUrl)
+  .handler(async ({ data: contentUrl }): Promise<string> => {
+    const res = await fetch(contentUrl, {
+      headers: {
+        ...authHeaders(),
+        Accept: 'application/pdf',
+      },
+      redirect: 'manual',
+    })
+
+    const location = res.headers.get('location')
+    if (!location) {
+      throw new Error('No redirect location for document download')
+    }
+
+    return location
+  })
+
+export const getDocumentBase64 = createServerFn({ method: 'GET' })
+  .inputValidator((contentUrl: string) => contentUrl)
+  .handler(async ({ data: contentUrl }): Promise<string> => {
+    const res = await fetch(contentUrl, {
+      headers: {
+        ...authHeaders(),
+        Accept: 'application/pdf',
+      },
+    })
+
+    if (!res.ok) {
+      throw new Error(`Document fetch error: ${res.status}`)
+    }
+
+    const buffer = await res.arrayBuffer()
+    const bytes = new Uint8Array(buffer)
+    let binary = ''
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i])
+    }
+    return btoa(binary)
+  })
+
 export const getCompanyOfficers = createServerFn({ method: 'GET' })
   .inputValidator((companyNumber: string) => companyNumber)
   .handler(async ({ data: companyNumber }): Promise<CompanyOfficerList> => {
